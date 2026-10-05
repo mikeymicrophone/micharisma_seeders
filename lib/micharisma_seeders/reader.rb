@@ -11,6 +11,13 @@ module MICharismaSeeders
     GROUP_FIELDS = %w[scope source entity_sequence groups records].freeze
     RECORD_FIELDS = %w[type code aliases attributes references scope entity_sequence source].freeze
 
+    def initialize(registry: nil)
+      if registry && !registry.is_a?(SequenceRegistry)
+        raise ValidationError, "registry must be a SequenceRegistry"
+      end
+      @registry = registry
+    end
+
     def self.discover(paths)
       Array(paths).flat_map do |path|
         path = path.to_s
@@ -41,7 +48,7 @@ module MICharismaSeeders
       end
       namespace = token!(document["namespace"], "namespace", location)
       catalog = token!(document["catalog"], "catalog", location)
-      context = { scope: {}, source: nil, entity_sequence: nil }
+      context = { scope: {}, source: nil, entity_sequence: nil, sequence_family: nil }
       context = inherit(document, context, location)
       records = collect(document, context, namespace, catalog, location)
       records.freeze
@@ -64,6 +71,9 @@ module MICharismaSeeders
       mapping!(row, location)
       fields!(row, RECORD_FIELDS, location)
       context = inherit(row, inherited, location)
+      if context[:sequence_family] && !context[:entity_sequence]
+        raise ValidationError.new("select a member of entity sequence family #{context[:sequence_family]} before defining records", location: location)
+      end
       type = string!(row["type"], "type", location)
       Scope.key(type, location: location)
       code = code!(row["code"], "code", location)
@@ -77,7 +87,7 @@ module MICharismaSeeders
       mapping!(references, "#{location}.references")
       string_keys!(attributes, "#{location}.attributes")
       string_keys!(references, "#{location}.references")
-      references.each { |name, value| reference!(value, "#{location}.references.#{name}") }
+      references.each { |name, value| reference!(value, "#{location}.references.#{name}", family: context[:sequence_family]) }
       values = { type: type, code: code, aliases: aliases, attributes: attributes, references: references,
                  scope: context[:scope], namespace: namespace, catalog: catalog, source: context[:source],
                  entity_sequence: context[:entity_sequence], location: location }
@@ -94,8 +104,13 @@ module MICharismaSeeders
                else
                  inherited[:source]
                end
-      sequence = container.key?("entity_sequence") ? SequenceRegistry.normalize_id(container["entity_sequence"], location: location) : inherited[:entity_sequence]
-      { scope: scope, source: source, entity_sequence: sequence }
+      if container.key?("entity_sequence")
+        selected = selection(container["entity_sequence"], family: inherited[:sequence_family], location: location)
+        sequence, family = selected.id, selected.family
+      else
+        sequence, family = inherited.values_at(:entity_sequence, :sequence_family)
+      end
+      { scope: scope, source: source, entity_sequence: sequence, sequence_family: family }
     end
 
     def fields!(mapping, allowed, location)
@@ -105,20 +120,31 @@ module MICharismaSeeders
       raise ValidationError.new("unsupported fields: #{unsupported.map(&:inspect).join(', ')}", location: location)
     end
 
-    def reference!(value, location)
+    def reference!(value, location, family: nil)
       if value.is_a?(String)
         code!(value, "reference", location)
       elsif value.is_a?(Hash)
         fields!(value, %w[code entity_sequence scope namespace catalog], location)
         code!(value["code"], "reference code", location)
         if value.key?("entity_sequence")
-          value["entity_sequence"] = SequenceRegistry.normalize_id(value["entity_sequence"], location: location)
+          selected = selection(value["entity_sequence"], family: family, location: location)
+          raise ValidationError.new("reference entity_sequence needs both a family and member", location: location) unless selected.complete?
+
+          value["entity_sequence"] = selected.id
         end
         value["scope"] = Scope.normalize(value["scope"], location: location) if value.key?("scope")
         %w[namespace catalog].each { |name| token!(value[name], name, location) if value.key?(name) }
       else
         raise ValidationError.new("reference must be a code string or mapping", location: location)
       end
+    end
+
+    def selection(value, family:, location:)
+      if !@registry && Array(value).any? { |part| (part.is_a?(String) || part.is_a?(Symbol)) && part.to_s.match?(/\A[A-Za-z]/) }
+        raise ValidationError.new("named entity sequences require a registry", location: location)
+      end
+      resolver = @registry || SequenceRegistry
+      resolver.selection(value, family: family, location: location)
     end
 
     def mapping!(value, location)

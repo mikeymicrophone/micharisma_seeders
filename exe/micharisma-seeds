@@ -25,7 +25,7 @@ begin
 
   count = 0
   paths.each do |path|
-    records = MICharismaSeeders::Reader.new.read(path)
+    records = MICharismaSeeders::Reader.new(registry: registry).read(path)
     records.each do |record|
       next unless registry
 

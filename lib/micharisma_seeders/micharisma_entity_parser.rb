@@ -2,13 +2,13 @@
 
 module MICharismaSeeders
   class MICharismaEntityParser
-    attr_reader :registry, :sequence, :namespace, :catalog, :adapter
+    attr_reader :registry, :sequence, :sequence_family, :namespace, :catalog, :adapter
 
-    def self.select_entity_sequence(id, registry:, namespace: "MIC", catalog: nil, adapter: nil)
-      new(registry: registry, namespace: namespace, catalog: catalog, adapter: adapter).select_entity_sequence(id)
+    def self.select_entity_sequence(*values, registry:, namespace: "MIC", catalog: nil, adapter: nil)
+      new(registry: registry, namespace: namespace, catalog: catalog, adapter: adapter).select_entity_sequence(*values)
     end
 
-    def initialize(registry:, namespace: "MIC", catalog: nil, adapter: nil, sequence: nil)
+    def initialize(registry:, namespace: "MIC", catalog: nil, adapter: nil, sequence: nil, sequence_family: nil)
       unless registry.is_a?(SequenceRegistry)
         raise ValidationError, "registry must be a SequenceRegistry"
       end
@@ -21,18 +21,27 @@ module MICharismaSeeders
         raise ValidationError, "adapter must implement resolve_sequence(mapping)"
       end
       @registry, @namespace, @catalog, @adapter, @sequence = registry, namespace&.dup&.freeze, catalog&.dup&.freeze, adapter, sequence
+      @sequence_family = sequence ? registry.validate_family!(sequence.id.split("_").first) : (registry.validate_family!(sequence_family) if sequence_family)
       freeze
     end
 
-    def select_entity_sequence(id)
-      self.class.new(registry: registry, namespace: namespace, catalog: catalog, adapter: adapter, sequence: registry.fetch(id))
+    def select_entity_sequence(*values)
+      selected = registry.selection(*values, family: sequence_family)
+      copy_with(selected.family, selected.complete? ? registry.fetch(selected.id) : nil)
+    end
+
+    def select_entity_sequence_family(family)
+      copy_with(registry.validate_family!(family), nil)
     end
 
     # A fully supplied code maps positionally. A shortened code supplies an
     # ordered subsequence; omitted slots must have known scope values. If more
     # than one resulting mapping is possible, there is no safe interpretation.
     def resolve(code, scope: {})
-      raise UnknownSequenceError, "select an entity sequence before resolving a construction" unless sequence
+      unless sequence
+        message = sequence_family ? "select a member of entity sequence family #{sequence_family} before resolving a construction" : "select an entity sequence before resolving a construction"
+        raise UnknownSequenceError, message
+      end
 
       parts = components(code)
       known = Scope.normalize(scope)
@@ -55,6 +64,11 @@ module MICharismaSeeders
     end
 
     private
+
+    def copy_with(family, selected)
+      self.class.new(registry: registry, namespace: namespace, catalog: catalog, adapter: adapter,
+        sequence: selected, sequence_family: family)
+    end
 
     def components(code)
       unless code.is_a?(String) && code.match?(/\A[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*\z/)
@@ -113,9 +127,22 @@ module MICharismaSeeders
       @scope = Scope.deep_freeze(Scope.normalize(scope))
     end
 
-    def sequence_is(id)
+    def sequence_is(*values, &block)
+      with_parser(@parser.select_entity_sequence(*values), &block)
+    end
+
+    def sequence_family_is(family, &block)
+      with_parser(@parser.select_entity_sequence_family(family), &block)
+    end
+
+    def resolve(code, scope: {})
+      parser.resolve(code, scope: @scope.merge(Scope.normalize(scope)))
+    end
+
+    private
+
+    def with_parser(selected)
       previous = @parser
-      selected = @parser.select_entity_sequence(id)
       unless block_given?
         @parser = selected
         return self
@@ -128,9 +155,6 @@ module MICharismaSeeders
       end
     end
 
-    def resolve(code, scope: {})
-      parser.resolve(code, scope: @scope.merge(Scope.normalize(scope)))
-    end
   end
 end
 

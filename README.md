@@ -8,6 +8,8 @@ Use Ruby 3.1 or newer. Load directly with `ruby -Ilib`, or add this repository a
 gem "micharisma_seeders", path: "lib/micharisma_seeders"
 ```
 
+Brand filenames use `micharisma_`: the public parser entry point is `require "micharisma_entity_parser"`, and its implementation is `lib/micharisma_seeders/micharisma_entity_parser.rb`. The public class retains the spelling `MICharismaEntityParser`. In Rails, `inflect.acronym "MICharisma"` makes brand class names and these filenames round-trip; the embedded package itself uses explicit requires.
+
 ## Seed documents
 
 JSON, YAML, and YML use the same `micharisma-seeds/v1` envelope:
@@ -46,6 +48,8 @@ The URL above illustrates source metadata; the library never fetches it. Example
 Header fields: `format`, `namespace`, `catalog`, optional `scope`, `source`, `entity_sequence`, `records`, and `groups`. Groups permit `scope`, `source`, `entity_sequence`, `records`, and recursively nested `groups`. Records require `type` and `code`, and permit `aliases`, `attributes`, `references`, `scope`, `entity_sequence`, and `source`. Unknown envelope/group/record fields fail with the file and document location. The application adapter validates its allowed types and model attributes.
 
 Scopes merge from file → ancestor groups → nearest group → record. Keys normalize `Sport`/`sport` to `sport`, and `AtBat`/`at_bat` to `at_bat`. Values must be nonblank strings or integers; integer years become strings. Entity names are data, never evaluated as Ruby constants. An explicit null scope or scope value is invalid. `source` mappings merge shallowly with nearer keys overriding inherited keys. `entity_sequence` inherits and may be overridden at group or record level; null selections are invalid. Each file starts with empty context.
+
+Sequence configuration also accepts a pair such as `entity_sequence: [5, 22]`, or a staged family/member: `entity_sequence: 5` at file scope followed by `entity_sequence: 22` in a group. Named choices require `Reader.new(registry: registry)` and use the terminology below. A family alone is incomplete; a member must be selected before a record is defined. Groups inherit their parent's family independently, so sibling choices do not leak.
 
 References are exact code strings or mappings containing required `code` and optional `entity_sequence`, `scope`, `namespace`, and `catalog`. Reference scopes remain explicit overrides: the application combines them with the record scope when performing a selected lookup. References without a selected sequence are for the application's exact code/alias resolver. Arrays, numeric database IDs, and extra reference-object fields are rejected.
 
@@ -101,7 +105,43 @@ parser.resolve("NYK", scope: {Sport: "BKT", League: "NBA", Year: 2024})
 # => the same mapping; Year can occur anywhere in the selected recipe.
 ```
 
-`MICharismaEntityParser` aliases `MICharismaSeeders::MICharismaEntityParser`. Selection returns an independent frozen parser. Sequence IDs supplied in Ruby/records are **strings**, such as `"01_10"`; bare `01_10` is a Ruby octal literal. Unknown IDs, including undefined `00_00`, fail rather than selecting a guessed recipe.
+`MICharismaEntityParser` aliases `MICharismaSeeders::MICharismaEntityParser`. Selection returns an independent frozen parser. Normalized IDs remain strings such as `"01_10"`. Configuration can use a full string, two integers, or staged integer choices:
+
+```ruby
+parser = MICharismaEntityParser.select_entity_sequence("05_22", registry: registry)
+parser = MICharismaEntityParser.select_entity_sequence(5, 22, registry: registry)
+parser = MICharismaEntityParser.select_entity_sequence(5, registry: registry)
+parser = parser.select_entity_sequence(22)
+```
+
+The latter examples require family 05/member 22 in the registry. A single integer chooses a family when no family is selected, then a member within that family. A full string or pair selects both at once. `parser.select_entity_sequence_family(5)` explicitly switches family and clears the previous member. Incomplete selections cannot resolve codes. Integer parts must be 0–99; a combined integer such as `522` is rejected. Bare `05_22` is octal 338; use `5, 22` instead. Unknown families and members fail.
+
+### Names for the numbers
+
+Optional terminology lives beside the unchanged two-level numeric recipes:
+
+```yaml
+05:
+  22: [Sport, League, Team, Year, Player]
+terminology:
+  families:
+    athletes: 5
+  sequences:
+    "05":
+      season_roster: 22
+```
+
+Names are aliases for the numbers. Member names are scoped to a family; multiple names may identify the same number. Undefined targets and normalized name collisions fail. Names use letters/numbers/underscores and normalize case/CamelCase like scope keys. Ruby accepts strings or symbols for names, mixed with numeric parts:
+
+```ruby
+parser = MICharismaEntityParser.select_entity_sequence(:athletes, :season_roster, registry: registry)
+parser = MICharismaEntityParser.select_entity_sequence(5, :season_roster, registry: registry)
+parser = MICharismaEntityParser.select_entity_sequence(:athletes, registry: registry)
+parser = parser.select_entity_sequence(:season_roster)
+registry.fetch(:athletes, :season_roster).id # => "05_22"
+```
+
+In YAML/JSON, use `[athletes, season_roster]`, or file-level `entity_sequence: athletes` with group-level `entity_sequence: season_roster`. Records and references retain the normalized numeric ID after reading. Keep named aliases bound to their original numbers when updating terminology; names used by existing files should remain available. Names are configuration data and never Ruby constants or method calls.
 
 Fully supplied codes map positionally, with their explicit values taking precedence over defaults in scope. `MIC-ALA-...` qualification is removed only after namespace/catalog validation. Shorter codes are ordered subsequences: missing slots must be filled by known scope values, and an explicitly supplied scoped slot must match its known value. A scope value may be a whole canonical entity reference containing dashes, such as `SPORT-BKT`, `BKT-LEAGUE-NBA`, or `YEAR-2022`; that known reference is retained intact as one slot's value and is never split. For example, `resolve("POR", scope: {Sport: "SPORT-BKT", League: "BKT-LEAGUE-NBA", Year: "YEAR-2022"})` under `[Sport, League, Year, Team]` returns those three complete references plus `"team" => "POR"`. Multiple possible mappings raise `AmbiguousCodeError`. Blank components, unsupported characters, excess components, and insufficient scope fail. Values remain vocabulary tokens or explicit references; the application must resolve and validate them. No literal `TEAM` or `SEASON` markers are injected.
 
@@ -134,6 +174,20 @@ end # prior selection restored, even after an exception
 ```
 
 A context is caller-local and mutable; use separate contexts for concurrent callers. Parser instances and registry/record data are immutable.
+
+The seed helper supports the same forms:
+
+```ruby
+context = MICharismaSeeders::Context.new(registry: registry, catalog: "ALA")
+context.sequence_is "05_22"
+context.sequence_is 5, 22
+context.sequence_family_is 5 # clears the previous member
+context.sequence_is 22
+context.sequence_family_is :athletes
+context.sequence_is :season_roster
+```
+
+On a fresh context, `sequence_is 5` followed later by `sequence_is 22` also works. Blocks restore both family and member, including after errors. Failed selections preserve the previous configuration.
 
 ## Validation and safety
 

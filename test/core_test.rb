@@ -42,6 +42,134 @@ class CoreTest < Minitest::Test
     MICharismaSeeders::MICharismaEntityParser.select_entity_sequence(id, registry: registry, catalog: "ALA", **options)
   end
 
+  def terminology_registry
+    MICharismaSeeders::SequenceRegistry.new({
+      "01" => { "10" => %w[Sport League Year Team], "11" => %w[Team Year Sport League] },
+      "05" => { "22" => %w[Sport League Team Year Player], "23" => %w[Sport Player] },
+      "terminology" => {
+        "families" => { "teams" => 1, "athletes" => 5 },
+        "sequences" => {
+          "01" => { "roster" => 10, "reordered" => 11 },
+          "05" => { "roster" => 22, "person" => 23 }
+        }
+      }
+    })
+  end
+
+  def test_string_integer_pair_and_staged_selection_have_the_same_recipe
+    selected = MICharismaEntityParser.select_entity_sequence("05_22", registry: terminology_registry)
+    pair = MICharismaEntityParser.select_entity_sequence(5, 22, registry: terminology_registry)
+    pending = MICharismaEntityParser.select_entity_sequence(5, registry: terminology_registry)
+    assert_nil pending.sequence
+    assert_equal "05", pending.sequence_family
+    assert_raises(MICharismaSeeders::UnknownSequenceError) { pending.resolve("HART_JOSH") }
+    staged = pending.select_entity_sequence(22)
+    [selected, pair, staged].each do |configured|
+      assert_equal "05_22", configured.sequence.id
+      assert_equal "HART_JOSH", configured.resolve("BKT-NBA-NYK-2022-HART_JOSH")["player"]
+    end
+    assert_nil pending.sequence
+    assert_equal "05_23", staged.select_entity_sequence(23).sequence.id
+    assert_nil staged.select_entity_sequence_family(1).sequence
+    assert_equal "01_10", staged.select_entity_sequence_family(1).select_entity_sequence(10).sequence.id
+    assert_equal "05_22", terminology_registry.fetch(5, 22).id
+  end
+
+  def test_terminology_names_mixed_with_numbers_and_scoped_to_their_family
+    configured = MICharismaEntityParser.select_entity_sequence(:athletes, :roster, registry: terminology_registry)
+    assert_equal "05_22", configured.sequence.id
+    assert_equal "01_10", terminology_registry.fetch(:teams, :roster).id
+    assert_equal "05_22", terminology_registry.fetch(5, "roster").id
+    assert_equal "05_22", terminology_registry.fetch("Athletes", 22).id
+    pending = MICharismaEntityParser.select_entity_sequence(:athletes, registry: terminology_registry)
+    assert_equal "05_22", pending.select_entity_sequence(:roster).sequence.id
+    assert_equal "01_11", configured.select_entity_sequence_family(:teams).select_entity_sequence(:reordered).sequence.id
+    assert_raises(MICharismaSeeders::UnknownSequenceError) { configured.select_entity_sequence(:reordered) }
+  end
+
+  def test_staged_seed_helper_blocks_restore_family_and_member_and_failed_choices_are_atomic
+    context = MICharismaSeeders::Context.new(registry: terminology_registry)
+    context.sequence_is 5
+    context.sequence_is 22
+    assert_equal "05_22", context.parser.sequence.id
+    previous = context.parser
+    assert_raises(MICharismaSeeders::UnknownSequenceError) { context.sequence_is 99 }
+    assert_same previous, context.parser
+    assert_raises(RuntimeError) do
+      context.sequence_family_is(:teams) do |local|
+        assert_nil local.parser.sequence
+        local.sequence_is :roster
+        assert_equal "01_10", local.parser.sequence.id
+        raise "stop"
+      end
+    end
+    assert_same previous, context.parser
+    context.sequence_is(:teams, :roster) do |local|
+      assert_equal "01_10", local.parser.sequence.id
+    end
+    assert_same previous, context.parser
+    assert_nil MICharismaSeeders::Context.new(registry: terminology_registry).parser.sequence_family
+  end
+
+  def test_invalid_numeric_choices_never_guess_combined_ids
+    [522, 338, -1, 100, 5.0, nil].each do |value|
+      assert_raises(MICharismaSeeders::ValidationError) { MICharismaEntityParser.select_entity_sequence(value, registry: terminology_registry) }
+    end
+    assert_raises(MICharismaSeeders::UnknownSequenceError) { MICharismaEntityParser.select_entity_sequence(9, registry: terminology_registry) }
+    assert_raises(MICharismaSeeders::ValidationError) { terminology_registry.fetch(5, 100) }
+    assert_raises(MICharismaSeeders::ValidationError) { terminology_registry.fetch(5, 22, 1) }
+  end
+
+  def test_terminology_rejects_unknown_targets_and_normalized_name_collisions
+    base = { "05" => { "22" => %w[Player] } }
+    terms = { "families" => { "Athletes" => 5, "athletes" => 5 } }
+    assert_raises(MICharismaSeeders::DuplicateKeyError) { MICharismaSeeders::SequenceRegistry.new(base.merge("terminology" => terms)) }
+    terms = { "families" => { "athletes" => 6 } }
+    assert_raises(MICharismaSeeders::UnknownSequenceError) { MICharismaSeeders::SequenceRegistry.new(base.merge("terminology" => terms)) }
+    terms = { "sequences" => { "05" => { "roster" => 23 } } }
+    assert_raises(MICharismaSeeders::UnknownSequenceError) { MICharismaSeeders::SequenceRegistry.new(base.merge("terminology" => terms)) }
+  end
+
+  def test_yaml_and_json_numeric_pairs_staged_names_and_reference_member_choices
+    input = document
+    input["entity_sequence"] = "athletes"
+    input["groups"] = [
+      { "entity_sequence" => "roster", "records" => [{ "type" => "Player", "code" => "HART_JOSH", "references" => {
+        "team" => { "code" => "NYK", "entity_sequence" => ["teams", "roster"] },
+        "player" => { "code" => "HART_JOSH", "entity_sequence" => 23 }
+      } }] },
+      { "entity_sequence" => 23, "records" => [{ "type" => "Player", "code" => "LEDDY_NICK" }] },
+      { "entity_sequence" => [1, 10], "groups" => [{ "entity_sequence" => 11,
+        "records" => [{ "type" => "Team", "code" => "KNICKS" }] }] }
+    ]
+    configured_reader = MICharismaSeeders::Reader.new(registry: terminology_registry)
+    json = configured_reader.read_string(JSON.generate(input), format: :json)
+    yaml = configured_reader.read_string(Psych.dump(input), format: :yaml)
+    assert_equal json.map(&:to_h), yaml.map(&:to_h)
+    assert_equal %w[05_22 05_23 01_11], yaml.map(&:entity_sequence)
+    assert_equal "01_10", yaml.first.references["team"]["entity_sequence"]
+    assert_equal "05_23", yaml.first.references["player"]["entity_sequence"]
+    assert_raises(MICharismaSeeders::ValidationError) { reader.read_string(Psych.dump(input), format: :yaml) }
+    next_file = document.merge("entity_sequence" => 22)
+    assert_raises(MICharismaSeeders::ValidationError) { configured_reader.read_string(Psych.dump(next_file), format: :yaml) }
+  end
+
+  def test_named_and_numeric_yaml_terminology_resolves_to_the_same_registry
+    text = Psych.dump({ "05" => { "22" => %w[Player] }, "terminology" => {
+      "families" => { "athletes" => 5 }, "sequences" => { "05" => { "roster" => 22 } }
+    } })
+    config = MICharismaSeeders::SequenceRegistry.new(MICharismaSeeders::SafeDocument.parse(text, format: :yaml))
+    assert_equal config.fetch("05_22"), config.fetch(:athletes, :roster)
+  end
+
+  def test_micharisma_parser_entry_point_and_filename
+    library_path = File.expand_path("../lib", __dir__)
+    stdout, stderr, status = Open3.capture3(RbConfig.ruby, "-I#{library_path}", "-e", 'require "micharisma_entity_parser"; puts MICharismaEntityParser.name')
+    assert status.success?, stderr
+    assert_equal "MICharismaSeeders::MICharismaEntityParser\n", stdout
+    assert_equal "micharisma_entity_parser.rb", File.basename(MICharismaEntityParser.method(:select_entity_sequence).source_location.first)
+  end
+
   def test_json_yaml_parity_and_nested_mixed_team_scope
     json = reader.read_string(JSON.generate(document), format: :json)
     yaml = reader.read_string(Psych.dump(document), format: :yaml)
@@ -246,9 +374,21 @@ class CoreTest < Minitest::Test
       assert status.success?, stderr
       assert_includes stdout, "Validated 3 records in 1 documents"
       assert_equal before, File.binread(seed_path)
+      named = document.merge("entity_sequence" => ["teams", "roster"])
+      named["groups"][0]["records"][0]["references"]["team"]["entity_sequence"] = "roster"
+      File.write(seed_path, Psych.dump(named))
+      File.rename(seed_path, seed_path = File.join(directory, "anything.yaml"))
+      File.write(registry_path, Psych.dump({ "01" => { "10" => %w[Sport League Year Team] }, "terminology" => {
+        "families" => { "teams" => 1 }, "sequences" => { "01" => { "roster" => 10 } }
+      } }))
+      before = File.binread(seed_path)
+      stdout, stderr, status = Open3.capture3(RbConfig.ruby, executable, "validate", "--registry", registry_path, directory)
+      assert status.success?, stderr
+      assert_includes stdout, "Validated 3 records in 1 documents"
+      assert_equal before, File.binread(seed_path)
       input = document
       input["entity_sequence"] = "99_99"
-      File.write(seed_path, JSON.generate(input))
+      File.write(seed_path, Psych.dump(input))
       _, stderr, status = Open3.capture3(RbConfig.ruby, executable, "validate", "--registry", registry_path, seed_path)
       refute status.success?
       assert_includes stderr, "unknown entity sequence"
