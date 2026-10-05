@@ -7,11 +7,25 @@ require "date"
 module MICharismaSeeders
   # Parsing only: no interpolation, object construction, includes, or networking.
   module SafeDocument
-    class StrictHash < Hash
-      def []=(key, value)
-        raise DuplicateKeyError, "duplicate key #{key.inspect}" if key?(key)
+    # Older JSON parsers build object_class instances directly. Do not subclass
+    # Hash: native parsers may bypass an overridden Hash#[]= fast path.
+    class StrictObject
+      def initialize
+        @values = {}
+      end
 
-        super
+      def []=(key, value)
+        raise DuplicateKeyError, "duplicate key #{key.inspect}" if @values.key?(key)
+
+        @values[key] = value
+      end
+
+      def [](key)
+        @values[key]
+      end
+
+      def to_h
+        @values.dup
       end
     end
 
@@ -37,7 +51,10 @@ module MICharismaSeeders
                # JSON.parse does not instantiate json_class additions. Unlike
                # JSON.load, it is safe by default; JSON 3 removed the redundant
                # create_additions option.
-               JSON.parse(text, object_class: StrictHash)
+               # Recent JSON 2 versions convert object_class only after native
+               # Hash construction, so the native duplicate check is required.
+               # Earlier versions ignore this option and use StrictObject#[]=.
+               JSON.parse(text, object_class: StrictObject, allow_duplicate_key: false)
              when "yaml", "yml"
                stream = Psych.parse_stream(text, filename: path)
                unless stream.children.length == 1
@@ -56,8 +73,8 @@ module MICharismaSeeders
 
       raise DuplicateKeyError.new(error.message, location: path)
     rescue JSON::ParserError => error
-      # JSON 3 rejects duplicates before calling StrictHash#[]=. Older JSON
-      # versions reach StrictHash instead; expose the same public error type.
+      # Recent JSON versions reject duplicates before object_class conversion.
+      # Older versions reach StrictObject instead; expose one public error type.
       error_class = error.message.match?(/\Aduplicate key(?:\s|:)/) ? DuplicateKeyError : ParseError
       raise error_class.new(error.message, location: path)
     rescue Psych::Exception, EncodingError => error
@@ -107,6 +124,8 @@ module MICharismaSeeders
 
     def portable(value, location)
       case value
+      when StrictObject
+        portable(value.to_h, location)
       when Hash
         value.each_with_object({}) { |(key, item), result| result[key] = portable(item, "#{location}.#{key}") }
       when Array

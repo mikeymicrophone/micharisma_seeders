@@ -187,6 +187,24 @@ class CoreTest < Minitest::Test
     end
   end
 
+  def test_json_duplicates_are_rejected_before_native_hash_conversion
+    samples = [
+      '{"x":null,"x":1}',
+      '{"records":[{"attributes":{"name":"first","name":"second"}}]}',
+      '{"x":1,"\u0078":2}'
+    ]
+    samples.each do |text|
+      error = assert_raises(MICharismaSeeders::DuplicateKeyError) do
+        MICharismaSeeders::SafeDocument.parse(text, format: :json, path: "duplicate.json")
+      end
+      assert_includes error.message, "duplicate.json"
+    end
+    value = MICharismaSeeders::SafeDocument.parse('{"outer":[{"name":"valid"}],"empty":{}}', format: :json)
+    assert_instance_of Hash, value
+    assert_instance_of Hash, value["outer"].first
+    assert_instance_of Hash, value["empty"]
+  end
+
   def test_normalized_scope_duplicates_unknown_fields_and_invalid_reference
     input = document
     input["scope"]["sport"] = "SOC"
