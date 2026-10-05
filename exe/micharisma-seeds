@@ -1,0 +1,44 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+$LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
+require "micharisma_seeders"
+require "optparse"
+
+options = {}
+option_parser = OptionParser.new do |parser|
+  parser.banner = "Usage: micharisma-seeds validate [--registry PATH] FILE_OR_DIRECTORY..."
+  parser.on("--registry PATH", "Validate selected sequence IDs against a registry") { |value| options[:registry] = value }
+end
+
+begin
+  command = ARGV.shift
+  option_parser.parse!(ARGV)
+  unless command == "validate" && !ARGV.empty?
+    warn option_parser.to_s
+    exit 2
+  end
+  registry = options[:registry] && MICharismaSeeders::SequenceRegistry.read(options[:registry])
+  paths = MICharismaSeeders::Reader.discover(ARGV)
+  paths = paths.reject { |path| File.expand_path(path) == File.expand_path(options[:registry]) } if options[:registry]
+  raise MICharismaSeeders::ValidationError, "no seed documents discovered" if paths.empty?
+
+  count = 0
+  paths.each do |path|
+    records = MICharismaSeeders::Reader.new.read(path)
+    records.each do |record|
+      next unless registry
+
+      registry.fetch(record.entity_sequence) if record.entity_sequence
+      record.references.each_value do |reference|
+        registry.fetch(reference["entity_sequence"]) if reference.is_a?(Hash) && reference["entity_sequence"]
+      end
+    end
+    count += records.length
+    puts "#{path}: valid (#{records.length} records)"
+  end
+  puts "Validated #{count} records in #{paths.length} documents. No data was written."
+rescue MICharismaSeeders::Error, OptionParser::ParseError => error
+  warn error.message
+  exit 1
+end
