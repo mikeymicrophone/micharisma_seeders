@@ -8,5 +8,5 @@ require_relative "micharisma_seeders/sequence_registry"
 require_relative "micharisma_seeders/micharisma_entity_parser"
 
 module MICharismaSeeders
-  VERSION = "0.2.0"
+  VERSION = "0.3.0"
 end

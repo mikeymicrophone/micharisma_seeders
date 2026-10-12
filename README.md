@@ -199,3 +199,19 @@ ruby -Ilib test/core_test.rb
 The CLI validates document structure and, when a registry is supplied, selected sequence IDs. It performs no network requests or data writes and does not claim to validate model fields, factual accuracy, identity collisions across files, or reference existence. The explicitly supplied registry file is excluded from seed discovery.
 
 Both parsers reject duplicate mapping keys. YAML also rejects aliases, merge keys, custom/Ruby tags, multiple documents, and non-finite numbers. Standard YAML dates/timestamps become ISO strings. JSON additions are disabled. ERB is rejected and never evaluated. Parse/validation failures raise subclasses of `MICharismaSeeders::Error`: `ParseError`, `ValidationError`, `DuplicateKeyError`, `UnknownSequenceError`, `CodeError`, and `AmbiguousCodeError`; errors expose `location` when available.
+
+## Publishing schemas (optional build tooling)
+
+Version 0.3 adds a Schematist exporter for JSON Schema Draft 2020-12. The exported schemas validate YAML and JSON after safe parsing. This tool requires Ruby 3.1.3 or newer; the runtime reader/parser remains dependency-free and does not load Schematist.
+
+```sh
+bundle install
+bundle exec ruby exe/export-seed-schemas --output schemas/v1
+bundle exec ruby exe/export-seed-schemas --catalog /path/to/ala.contract.json --output schemas/v1
+bundle exec ruby exe/export-seed-schemas --catalog /path/to/ala.contract.json --output schemas/v1 --check
+bundle exec ruby -Ilib test/schema_exporter_test.rb
+```
+
+The optional catalog metadata has `namespace`, `catalog`, and `entities`; each entity supplies an `attributes` mapping of JSON Schema fragments and an allowed `references` array. Consumers export that metadata from their own adapter/model declarations. The shared package contains no application model dependencies. Use `--base-url` to select the publication location; generated documents have only internal `$ref` links and validate offline.
+
+The shared envelope schema is catalog-independent. Catalog schemas restrict record types, attribute fields/types, and reference names, without requiring every row to repeat inherited relationships. Public contributor tooling can consume the exported files without this private repository or its build dependencies. Schemas do not resolve identities, interpret staged sequence context, or implement replay policy; the reader and consuming app remain authoritative for those checks. Reader field declarations are checked during generation, and `--check` detects changed/stale published output.

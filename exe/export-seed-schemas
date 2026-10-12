@@ -1,0 +1,28 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+$LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
+require "micharisma_seeders/schema_exporter"
+require "optparse"
+
+options = {}
+parser = OptionParser.new do |flags|
+  flags.banner = "Usage: export-seed-schemas --output DIRECTORY [--catalog CONTRACT.json] [--check]"
+  flags.on("--output DIRECTORY") { |value| options[:output] = value }
+  flags.on("--catalog PATH") { |value| options[:catalog] = value }
+  flags.on("--base-url URL") { |value| options[:base_url] = value }
+  flags.on("--check") { options[:check] = true }
+end
+begin
+  parser.parse!
+  raise OptionParser::MissingArgument, "--output" unless options[:output]
+  raise OptionParser::InvalidArgument, ARGV.join(" ") unless ARGV.empty?
+  catalog = options[:catalog] && MICharismaSeeders::SafeDocument.read(options[:catalog])
+  args = { catalog: catalog }
+  args[:base_url] = options[:base_url] if options[:base_url]
+  MICharismaSeeders::SchemaExporter.new(**args).write(options[:output], check: options[:check])
+  puts options[:check] ? "Published schemas match their declarations." : "Exported seed schemas to #{options[:output]}"
+rescue MICharismaSeeders::Error, OptionParser::ParseError => error
+  warn error.message
+  exit 1
+end
